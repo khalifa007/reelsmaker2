@@ -46,9 +46,19 @@ client = OpenAI(api_key=openai_api_key)
 _CHAT_DIRECTOR_PROMPT = textwrap.dedent(
     """
     You are a creative director for short‑form social media videos. When given a TOPIC,
-    produce an engaging 35–45 second reel broken into 5–7 SCENES. Each scene needs:
-    1. an image prompt describing what to show (vivid visual language, no text)
-    2. a concise on‑screen caption under 40 characters
+    produce an engaging 45–60 second reel broken into 6–8 SCENES that tells a complete story. 
+    
+    Structure the reel as follows:
+    1. Hook: Start with something attention-grabbing
+    2. Build interest with compelling visuals and facts
+    3. Deliver value or entertainment
+    4. End with a strong conclusion or call-to-action
+    
+    Each scene needs:
+    1. an image prompt describing what to show (vivid visual language, no text overlays)
+    2. a concise on‑screen caption under 35 characters that complements the visual
+    3. make captions engaging and easy to read quickly
+    
     Return ONLY valid JSON in the form:
     {"scenes": [{"prompt": "…", "caption": "…"}, …]}
     """
@@ -146,7 +156,7 @@ def generate_image(prompt: str,
             model="gpt-image-1",  # swap to "dall-e-3" if preferred
             prompt=prompt,
             size=size,
-            quality='low',
+            quality='medium',
             n=1,
         )
 
@@ -178,6 +188,7 @@ def generate_image(prompt: str,
 
 WIDTH, HEIGHT = 1080, 1920  # Instagram portrait
 SCENE_DURATION = 6  # seconds per scene
+TITLE_DURATION = 3  # seconds for title card
 
 
 def build_clip(image_bytes: bytes, caption: str, duration: float = SCENE_DURATION) -> CompositeVideoClip:
@@ -259,6 +270,81 @@ def build_clip(image_bytes: bytes, caption: str, duration: float = SCENE_DURATIO
     except Exception as e:
         raise ValueError(f"Failed to build video clip: {e}")
 
+
+def create_title_card(topic: str, duration: float = TITLE_DURATION) -> CompositeVideoClip:
+    """Create an intro title card that tells viewers what the reel is about."""
+    try:
+        # Create a gradient background
+        import numpy as np
+        gradient = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
+        
+        # Create a vertical gradient from dark blue to purple
+        for y in range(HEIGHT):
+            ratio = y / HEIGHT
+            r = int(25 + ratio * 100)  # 25 -> 125
+            g = int(25 + ratio * 50)   # 25 -> 75  
+            b = int(50 + ratio * 150)  # 50 -> 200
+            gradient[y, :] = [r, g, b]
+        
+        # Create background clip
+        bg_clip = ImageClip(gradient, duration=duration)
+        
+        # Create main title text
+        main_title = f"📱 {topic.upper()}"
+        try:
+            title_clip = TextClip(
+                text=main_title,
+                font=str(FONT_PATH) if FONT_PATH.exists() else None,
+                font_size=80,
+                color="white",
+                stroke_color="black",
+                stroke_width=3,
+                method="caption",
+                size=(int(WIDTH * 0.85), None),
+                text_align="center"
+            ).with_duration(duration).with_position(("center", HEIGHT // 2 - 100))
+            
+        except Exception as err:
+            print(f"[TitleCard] Falling back to default font: {err}")
+            title_clip = TextClip(
+                text=main_title,
+                font_size=80,
+                color="white",
+                stroke_color="black",
+                stroke_width=3,
+                method="caption",
+                size=(int(WIDTH * 0.85), None),
+                text_align="center"
+            ).with_duration(duration).with_position(("center", HEIGHT // 2 - 100))
+        
+        # Create subtitle text
+        subtitle = "Swipe up for more! 👆"
+        try:
+            subtitle_clip = TextClip(
+                text=subtitle,
+                font=str(FONT_PATH) if FONT_PATH.exists() else None,
+                font_size=45,
+                color="lightgray",
+                method="caption",
+                size=(int(WIDTH * 0.8), None),
+                text_align="center"
+            ).with_duration(duration).with_position(("center", HEIGHT // 2 + 50))
+            
+        except Exception:
+            subtitle_clip = TextClip(
+                text=subtitle,
+                font_size=45,
+                color="lightgray",
+                method="caption",
+                size=(int(WIDTH * 0.8), None),
+                text_align="center"
+            ).with_duration(duration).with_position(("center", HEIGHT // 2 + 50))
+        
+        return CompositeVideoClip([bg_clip, title_clip, subtitle_clip], size=(WIDTH, HEIGHT))
+        
+    except Exception as e:
+        raise ValueError(f"Failed to create title card: {e}")
+
 # -----------------------------------------------------------------------------
 # Main pipeline
 # -----------------------------------------------------------------------------
@@ -279,6 +365,16 @@ def make_reel(topic: str, music_path: str | None = None,
     # Create output directory
     pathlib.Path(out_dir).mkdir(parents=True, exist_ok=True)
     clips = []
+
+    # Create title card as first clip
+    print("Creating title card...")
+    try:
+        title_card = create_title_card(topic)
+        clips.append(title_card)
+        print("✅ Title card created successfully")
+    except Exception as e:
+        print(f"Warning: Failed to create title card: {e}")
+        print("Continuing without title card...")
 
     # Generate each scene
     for i, scene in enumerate(tqdm(scenes, desc="Generating scenes")):
@@ -331,8 +427,8 @@ def make_reel(topic: str, music_path: str | None = None,
         video.write_videofile(
             str(output_path),
             fps=30,
-            codec="mpeg4",
-            preset="medium",
+            codec="h264_nvenc",
+            preset="p4",
             threads=os.cpu_count() or 4,
             audio_codec="aac",
             logger=None     # Suppress moviepy logging
